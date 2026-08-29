@@ -35,6 +35,8 @@ jobs:
           ls -la
 
       - name: Run unit tests
+        env:
+          PYTHONIOENCODING: utf-8
         run: python -m pytest tests/ -q
 
       - name: Build EXE
@@ -43,6 +45,8 @@ jobs:
 
       - name: Smoke test (synthetic paper through full OCR pipeline)
         shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
         run: |
           # 合成试卷图跑全管线（真实样本含学生隐私，不入仓库）
           python tools/synthetic_smoke.py
