@@ -1,0 +1,61 @@
+name: Build Windows EXE
+
+on:
+  push:
+    tags: ["v*"]            # 推 tag 自动出 Release
+  workflow_dispatch: {}     # 也可手动触发
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller==6.22.2
+
+      - name: Download OCR models (PP-OCRv5 server)
+        shell: bash
+        run: |
+          mkdir -p app/models
+          cd app/models
+          curl -L -o ch_PP-OCRv5_det_server.onnx \
+            https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/det/ch_PP-OCRv5_det_server.onnx
+          curl -L -o ch_PP-OCRv5_rec_server.onnx \
+            https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/rec/ch_PP-OCRv5_rec_server.onnx
+          curl -L -o ch_ppocr_mobile_v2.0_cls_mobile.onnx \
+            https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv4/cls/ch_ppocr_mobile_v2.0_cls_mobile.onnx
+          ls -la
+
+      - name: Run unit tests
+        run: python -m pytest tests/ -q
+
+      - name: Build EXE
+        working-directory: packaging
+        run: pyinstaller --clean --noconfirm dengfen.spec
+
+      - name: Smoke test (synthetic paper through full OCR pipeline)
+        shell: bash
+        run: |
+          # 合成试卷图跑全管线（真实样本含学生隐私，不入仓库）
+          python tools/synthetic_smoke.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 登分助手-windows
+          path: packaging/dist/*.exe
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packaging/dist/*.exe
+          generate_release_notes: true

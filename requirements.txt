@@ -1,0 +1,8 @@
+# 登分助手 - 运行时依赖（mac 开发与 Windows CI 共用，版本锁定）
+rapidocr==3.9.2
+onnxruntime==1.19.2
+opencv-python==4.14.0.94
+pyside6-essentials==6.10.3
+openpyxl==3.1.5
+rapidfuzz==3.14.3
+pillow==12.0.0

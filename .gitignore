@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+app/models/
+*.xlsx
+!tests/data/*.xlsx
+dist/
+build/
+*.spec.bak
+# 含真实学生数据的样本，不上传公开仓库
+样本图片/
+测试名单.xlsx
+/tmp/
+*.log
+.claude/
