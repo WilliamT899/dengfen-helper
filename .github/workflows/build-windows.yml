@@ -8,8 +8,12 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
+    permissions:
+      contents: write   # 创建 Release 需要
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 完整历史，Release 步骤需识别 tag
 
       - uses: actions/setup-python@v5
         with:
