@@ -35,8 +35,9 @@ class OcrEngine:
                  server_det: bool = False):
         from rapidocr import RapidOCR, LangDet, LangRec, ModelType, OCRVersion
 
-        # 默认：mobile det（快）+ server rec（手写识别质量）
+        # 默认：mobile det（快）+ server rec（手写识别质量）；关闭 cls（管线自行处理旋转）
         effective: dict = {
+            "Global.use_cls": False,
             "Det.ocr_version": OCRVersion.PPOCRV5,
             "Det.lang_type": LangDet.CH,
             "Det.model_type": ModelType.SERVER if server_det else ModelType.MOBILE,

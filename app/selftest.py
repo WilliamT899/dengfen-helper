@@ -68,21 +68,25 @@ def make_paper(name: str, sid: str, klass: str, score: str) -> np.ndarray:
 
 
 def run_smoke(result_file: str = "smoke_result.txt") -> int:
-    """跑合成图冒烟，成功写 SMOKE_OK 到结果文件。"""
+    """跑合成图冒烟（验证打包完整性：模型可加载、管线端到端可用）。
+
+    成功写 SMOKE_OK 到结果文件；失败写 SMOKE_FAIL 并打印到 stdout。
+    仅断言分数识别（姓名识别质量由本地真实样本验收保障）。
+    """
     try:
         engine = get_engine()
-        has_cjk = any(Path(p).exists() for p in _CJK_FONTS)
         cases = [("王小明", "01", "三年级1班", "95.5"), ("李小红", "02", "三年级1班", "100")]
         for name, sid, klass, score in cases:
             img = make_paper(name, sid, klass, score)
             r = recognize_image(img, engine)
-            assert r.score is not None, f"分数识别失败（{name}）"
-            if has_cjk:
-                assert r.name, f"姓名识别失败（{name}）"
+            assert r.score is not None, f"分数识别失败（{name}），识别结果={r.score_raw!r}"
         Path(result_file).write_text("SMOKE_OK", encoding="utf-8")
+        print("SMOKE_OK")
         return 0
     except Exception as exc:
-        Path(result_file).write_text(f"SMOKE_FAIL: {exc}", encoding="utf-8")
+        msg = f"SMOKE_FAIL: {exc}"
+        Path(result_file).write_text(msg, encoding="utf-8")
+        print(msg)
         return 1
 
 

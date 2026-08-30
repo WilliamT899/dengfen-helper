@@ -25,7 +25,7 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller==6.22.2 pytest
 
-      - name: Download OCR models (PP-OCRv5 mobile-det + server-det + server-rec)
+      - name: Download OCR models (PP-OCRv5 mobile-det + server-det + server-rec + cls)
         shell: bash
         run: |
           mkdir -p app/models
@@ -36,6 +36,8 @@ jobs:
             https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/det/ch_PP-OCRv5_det_server.onnx
           curl -L -o ch_PP-OCRv5_rec_server.onnx \
             https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv5/rec/ch_PP-OCRv5_rec_server.onnx
+          curl -L -o ch_ppocr_mobile_v2.0_cls_mobile.onnx \
+            https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv4/cls/ch_ppocr_mobile_v2.0_cls_mobile.onnx
           ls -la
 
       - name: Run unit tests
@@ -54,6 +56,9 @@ jobs:
         run: |
           # 源码模式冒烟：合成试卷图跑全管线
           python tools/synthetic_smoke.py
+          EXIT=$?
+          cat smoke_result.txt 2>/dev/null || true
+          grep -q "SMOKE_OK" smoke_result.txt
 
       - name: Smoke test built EXE (validate bundled models and package data)
         shell: bash
