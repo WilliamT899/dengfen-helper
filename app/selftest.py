@@ -38,7 +38,7 @@ def make_paper(name: str, sid: str, klass: str, score: str) -> np.ndarray:
     draw.text((280, 80), "2025-2026学年第二学期期末水平测试", fill="black", font=font_small)
 
     font_score = ImageFont.truetype(font_big.path, 140) if hasattr(font_big, "path") else font_big
-    draw.text((880, 140), score, fill="black", font=font_score, stroke_width=2)
+    draw.text((960, 140), score, fill="black", font=font_score, stroke_width=2)
 
     x = 60
     def draw_vertical(text: str, y: int, font, fill="black"):

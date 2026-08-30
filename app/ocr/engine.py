@@ -27,17 +27,19 @@ def _to_rect(points) -> Box:
 class OcrEngine:
     """RapidOCR 封装。线程安全（内部互斥）。
 
-    params 使用 RapidOCR 的 dot-key 格式（如 'Rec.ocr_version'）。
+    快速引擎（默认）：v5 mobile 检测 + v5 server 识别（~1s/区域）
+    兜底引擎（server_det=True）：v5 server 检测（~8s/区域，仅字段缺失时使用）
     """
 
-    def __init__(self, models_dir: Optional[str] = None, params: Optional[dict] = None):
+    def __init__(self, models_dir: Optional[str] = None, params: Optional[dict] = None,
+                 server_det: bool = False):
         from rapidocr import RapidOCR, LangDet, LangRec, ModelType, OCRVersion
 
-        # 默认使用 PP-OCRv5 server 模型（官方唯一训练过中文手写体的模型）
+        # 默认：mobile det（快）+ server rec（手写识别质量）
         effective: dict = {
             "Det.ocr_version": OCRVersion.PPOCRV5,
             "Det.lang_type": LangDet.CH,
-            "Det.model_type": ModelType.SERVER,
+            "Det.model_type": ModelType.SERVER if server_det else ModelType.MOBILE,
             "Rec.ocr_version": OCRVersion.PPOCRV5,
             "Rec.lang_type": LangRec.CH,
             "Rec.model_type": ModelType.SERVER,
@@ -67,35 +69,63 @@ class OcrEngine:
     def detect(self, image: np.ndarray) -> List[Tuple[Box, float]]:
         """仅检测文本行框（用于方向判定等）。"""
         with self._lock:
-            result = self._ocr.det(image)
+            result = self._ocr(image, use_rec=False, use_cls=False)
         if result is None or result.boxes is None:
             return []
         scores = result.scores if result.scores is not None else (0.0,) * len(result.boxes)
         return [(_to_rect(b), float(s)) for b, s in zip(result.boxes, scores)]
 
     def recognize_lines(self, image: np.ndarray, boxes: List[Box]) -> List[Tuple[Box, str, float]]:
-        """对给定框逐行识别（竖排分割后按块识别时使用）。"""
+        """对给定框裁剪后逐行识别（rec-only，跳过 det，速度快）。
+
+        RapidOCR 的 rec-only 接口接收裁剪图列表。
+        """
         outs: List[Tuple[Box, str, float]] = []
+        crops: List[np.ndarray] = []
+        valid_boxes: List[Box] = []
+        ih, iw = image.shape[:2]
+        for box in boxes:
+            x0, y0, x1, y1 = (int(v) for v in box)
+            x0, y0 = max(0, x0), max(0, y0)
+            x1, y1 = min(iw, x1), min(ih, y1)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            crops.append(image[y0:y1, x0:x1])
+            valid_boxes.append((x0, y0, x1, y1))
+        if not crops:
+            return outs
         with self._lock:
-            for box in boxes:
-                rec = self._ocr.rec(image, box)
-                if rec is None:
-                    continue
-                text = "".join(rec.txts or [])
-                score = float(np.mean(rec.scores)) if rec.scores is not None and len(rec.scores) else 0.0
-                outs.append((tuple(map(float, box)), text, score))
+            rec = self._ocr.recognize_txt(crops)
+        if rec is None:
+            return outs
+        txts = rec.txts or []
+        scores = rec.scores or (0.0,) * len(txts)
+        for box, text, score in zip(valid_boxes, txts, scores):
+            outs.append((tuple(map(float, box)), str(text), float(score)))
         return outs
 
 
 _engine: Optional[OcrEngine] = None
+_server_engine: Optional[OcrEngine] = None
 _engine_lock = threading.Lock()
 
 
 def get_engine() -> OcrEngine:
-    """进程级单例（懒加载，首次调用会初始化模型，耗时数秒）。"""
+    """快速引擎单例（mobile det + server rec）。"""
     global _engine
     if _engine is None:
         with _engine_lock:
             if _engine is None:
                 _engine = OcrEngine(models_dir=str(config.models_dir()))
     return _engine
+
+
+def get_server_engine() -> OcrEngine:
+    """兜底引擎单例（server det + server rec，仅字段缺失时加载使用）。"""
+    global _server_engine
+    if _server_engine is None:
+        with _engine_lock:
+            if _server_engine is None:
+                _server_engine = OcrEngine(models_dir=str(config.models_dir()),
+                                           server_det=True)
+    return _server_engine

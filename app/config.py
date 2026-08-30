@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "登分助手"
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.1.0"
 
 # 打包后模型资源解压目录（PyInstaller 运行时），开发时为 None
 _BUNDLE_DIR = getattr(sys, "_MEIPASS", None)

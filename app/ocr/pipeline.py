@@ -66,7 +66,11 @@ def _downscale(img: np.ndarray, long_side: int = LONG_SIDE) -> np.ndarray:
 
 
 def recognize_image(img: np.ndarray, engine: Optional[OcrEngine] = None) -> PaperResult:
-    """识别一张试卷图像（BGR numpy，全分辨率走字段提取）。"""
+    """识别一张试卷图像（BGR numpy，全分辨率走字段提取）。
+
+    两级策略：快速引擎（mobile det）先行；姓名/学号/分数缺失时，
+    用 server det 兜底引擎仅重试缺失字段（server det 慢但检出率高）。
+    """
     t0 = time.monotonic()
     engine = engine or get_engine()
 
@@ -82,6 +86,19 @@ def recognize_image(img: np.ndarray, engine: Optional[OcrEngine] = None) -> Pape
 
     left = extract_left_fields(engine, page)
     score, sconf, sraw = extract_score(engine, page)
+
+    # 兜底重试（仅缺失字段；学号/班级缺失不触发慢路径——姓名匹配已足够定位学生）
+    missing_name = not left.get("姓名", ("",))[0]
+    if missing_name or score is None:
+        from app.ocr.engine import get_server_engine
+        server = get_server_engine()
+        if missing_name:
+            left2 = extract_left_fields(server, page)
+            for k, v in left2.items():
+                if not left.get(k, ("",))[0] and v[0]:
+                    left[k] = v
+        if score is None:
+            score, sconf, sraw = extract_score(server, page)
 
     result = PaperResult(
         name=left.get("姓名", ("", 0.0))[0],

@@ -19,7 +19,7 @@ from app.matcher import match_student
 from app.roster import Roster, load_roster
 from app.storage import save_photo
 from app.ui.table_model import ScoreTableModel
-from app.ui.workers import OcrBatchWorker
+from app.ui.workers import OcrQueueThread, PhotoResult
 from app.workspace import Workspace
 
 
@@ -38,6 +38,17 @@ class MainWindow(QMainWindow):
         self.photo_dir = config.photos_dir()
         self.camera: CameraThread | None = None
         self._last_frame: np.ndarray | None = None
+        self._preview_pixmap: QPixmap | None = None
+        self._last_preview_ts = 0.0
+
+        # 识别队列：拍摄/上传与识别解耦，界面永不阻塞
+        self.ocr_queue = OcrQueueThread()
+        self.ocr_queue.progress.connect(self._on_progress)
+        self.ocr_queue.result.connect(self._on_ocr_result)
+        self.ocr_queue.error.connect(self._on_worker_error)
+        self.ocr_queue.model_ready.connect(
+            lambda msg: self.status.showMessage(msg, 8000))
+        self.ocr_queue.start()  # 启动即预热识别模型
 
         # ---- 顶部工具栏 ----
         toolbar = QHBoxLayout()
@@ -63,7 +74,7 @@ class MainWindow(QMainWindow):
         left_lay = QVBoxLayout(left)
         self.camera_view = QLabel("摄像头未连接")
         self.camera_view.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.camera_view.setMinimumSize(480, 600)
+        self.camera_view.setMinimumSize(360, 320)
         self.camera_view.setStyleSheet(
             "background:#141519;border:1px solid #3d4148;border-radius:8px;color:#666;font-size:16px;")
         left_lay.addWidget(self.camera_view, 1)
@@ -103,6 +114,18 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.table.verticalHeader().setDefaultSectionSize(30)
+        # 双击进入编辑时保留原内容（光标在末尾，不自动全选）
+        from PySide6.QtWidgets import QStyledItemDelegate
+
+        class KeepTextDelegate(QStyledItemDelegate):
+            def setEditorData(self, editor, index):
+                text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+                editor.setText(text)
+                editor.setCursorPosition(len(text))
+                if hasattr(editor, "deselect"):
+                    editor.deselect()
+
+        self.table.setItemDelegate(KeepTextDelegate(self.table))
         right_lay.addWidget(self.table, 1)
 
         bottom_row = QHBoxLayout()
@@ -115,8 +138,12 @@ class MainWindow(QMainWindow):
         bottom_row.addWidget(self.lbl_stats)
         right_lay.addLayout(bottom_row)
 
+        # 进度条常驻（固定高度，避免显示/隐藏引起的布局跳动）
         self.progress = QProgressBar()
-        self.progress.setVisible(False)
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        self.progress.setFixedHeight(16)
+        self.progress.setTextVisible(False)
         right_lay.addWidget(self.progress)
 
         # ---- 布局 ----
@@ -137,7 +164,6 @@ class MainWindow(QMainWindow):
 
         self._refresh_stats()
         self._start_camera()
-        self._warmup_engine()
 
     # ---- 删除全部 ----
     def clear_all(self):
@@ -194,7 +220,7 @@ class MainWindow(QMainWindow):
         self._last_frame = frame
         # 预览节流：最多 10 帧/秒，避免高分辨率帧转换占满界面线程
         now = time.monotonic()
-        if now - getattr(self, "_last_preview_ts", 0) < 0.1:
+        if now - self._last_preview_ts < 0.1:
             return
         self._last_preview_ts = now
         # 预览缩小到宽 960 再转换，降低 CPU 占用
@@ -206,9 +232,20 @@ class MainWindow(QMainWindow):
         h, w = frame.shape[:2]
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
-        self.camera_view.setPixmap(QPixmap.fromImage(img).scaled(
+        self._preview_pixmap = QPixmap.fromImage(img)
+        self._render_preview()
+
+    def _render_preview(self):
+        """按当前显示区大小重绘预览（窗口缩放自适应）。"""
+        if self._preview_pixmap is None:
+            return
+        self.camera_view.setPixmap(self._preview_pixmap.scaled(
             self.camera_view.size(), Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._render_preview()
 
     def capture_frame(self):
         if self.camera is None or self._last_frame is None:
@@ -227,47 +264,11 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.status.showMessage(f"照片保存失败：{exc}", 10000)
             return
-        # 2) 快门动画
+        # 2) 快门动画 + 入队识别（可继续连拍，识别在后台排队进行）
         self._flash_overlay()
-        # 3) 后台识别（不阻塞界面，识别期间拍摄键暂时禁用）
-        self.status.showMessage(f"已拍摄（{tmp_path.name}），正在识别姓名和分数…")
-        self.btn_shutter.setEnabled(False)
-        worker = OcrBatchWorker([tmp_path])
-        worker.progress.connect(self._on_progress)
-        worker.error.connect(self._on_worker_error)
-        worker.done.connect(lambda results: self._on_capture_done(results, tmp_path))
-        self.thread_pool.start(worker)
-
-    def _on_capture_done(self, results: list, tmp_path: Path):
-        self.btn_shutter.setEnabled(True)
-        self.progress.setVisible(False)
-        r = results[0] if results else None
-        if r is None or (r.score is None and not r.name):
-            self.status.showMessage(
-                f"未能识别出姓名和分数，照片已保存为 {tmp_path.name}，请在表格中手动录入", 20000)
-            return
-        m = match_student(r.name, r.student_id, self.roster)
-        if m.is_unique:
-            name, sid, klass = m.student.name, m.student.student_id, m.student.klass
-            status = "unique"
-        else:
-            name, sid, klass, status = r.name, r.student_id, r.klass, \
-                ("multiple" if m.status == "multiple" else "none")
-        if status == "unique" and r.score is not None and r.score_conf < 0.75:
-            status = "low_score"
-        # 按识别结果重命名照片：姓名_分数.jpg
-        try:
-            from app.storage import rename_photo
-            photo = str(rename_photo(tmp_path, name or "待确认", r.score) or tmp_path)
-        except Exception:
-            photo = str(tmp_path)
-        self.workspace.apply_result(sid, name, klass, r.score, photo, match_status=status)
-        self.model.refresh_all()
-        self.workspace.save()
-        self._refresh_stats()
-        score_text = f"{r.score:g}" if r.score is not None else "待确认"
+        self.ocr_queue.enqueue([tmp_path])
         self.status.showMessage(
-            f"识别完成：{name or '未识别'} 分数 {score_text}（{Path(photo).name}）", 15000)
+            f"已拍摄（{tmp_path.name}），已加入识别队列，排队中 {self.ocr_queue.queue_length()} 张")
 
     def _flash_overlay(self):
         overlay = QLabel(self.camera_view)
@@ -276,63 +277,56 @@ class MainWindow(QMainWindow):
         overlay.show()
         QTimer.singleShot(200, overlay.deleteLater)
 
-    def _warmup_engine(self):
-        """启动时后台加载识别模型（首张照片不用等模型加载），失败提前提示。"""
-        from app.ui.workers import EngineWarmupWorker
-        self._warmup_worker = EngineWarmupWorker()
-        self._warmup_worker.signals.done.connect(
-            lambda result: self.status.showMessage(str(result[1]), 8000))
-        self.thread_pool.start(self._warmup_worker)
-
     def _run_batch(self, paths: list[Path]):
         if not self.roster:
             QMessageBox.information(self, "提示", "请先导入学生名单，再导入照片。")
             return
-        self.progress.setVisible(True)
-        self.progress.setRange(0, len(paths))
-        worker = OcrBatchWorker(paths)
-        worker.progress.connect(self._on_progress)
-        worker.done.connect(self._on_batch_done)
-        worker.error.connect(self._on_worker_error)
-        self.thread_pool.start(worker)
-        self.btn_photos.setEnabled(False)
+        self.ocr_queue.enqueue(paths)
+        self.status.showMessage(
+            f"已加入识别队列 {len(paths)} 张（当前排队 {self.ocr_queue.queue_length()} 张）")
 
     def _on_progress(self, done: int, total: int, detail: str = ""):
-        self.progress.setValue(done)
+        if total > 0:
+            self.progress.setRange(0, max(total, 1))
+            self.progress.setValue(done)
         text = f"识别中 {done}/{total}｜{detail}" if detail else f"识别中 {done}/{total}…"
         self.status.showMessage(text)
 
     def _on_worker_error(self, message: str):
         self.status.showMessage(f"⚠ {message}", 15000)
 
-    def _on_batch_done(self, results: list):
-        self.btn_photos.setEnabled(True)
-        self.progress.setVisible(False)
+    def _on_ocr_result(self, r: PhotoResult):
+        """单张识别完成即回填（拍摄与批量共用）。"""
         if not self.roster:
             return
-        for r in results:
-            m = match_student(r.name, r.student_id, self.roster)
-            if m.is_unique:
-                name, sid, klass = m.student.name, m.student.student_id, m.student.klass
-                status = "unique"
+        m = match_student(r.name, r.student_id, self.roster)
+        if m.is_unique:
+            name, sid, klass = m.student.name, m.student.student_id, m.student.klass
+            status = "unique"
+        else:
+            name, sid, klass, status = r.name, r.student_id, r.klass, \
+                ("multiple" if m.status == "multiple" else "none")
+        # 分数置信度不足（如 9/6 易混淆）→ 标记待确认
+        if status == "unique" and r.score is not None and r.score_conf < 0.75:
+            status = "low_score"
+        # 照片存档：拍摄的照片已在本目录（拍摄_xxx.jpg）→ 重命名；导入的照片 → 拷贝
+        src = Path(r.path)
+        photo = ""
+        try:
+            if src.parent == self.photo_dir and src.name.startswith("拍摄_"):
+                from app.storage import rename_photo
+                photo = str(rename_photo(src, name or "待确认", r.score) or src)
             else:
-                name, sid, klass, status = r.name, r.student_id, r.klass, \
-                    ("multiple" if m.status == "multiple" else "none")
-            # 分数置信度不足（如 9/6 易混淆）→ 标记待确认
-            if status == "unique" and r.score is not None and r.score_conf < 0.75:
-                status = "low_score"
-            # 存档照片：姓名_分数.jpg
-            photo = ""
-            try:
-                photo = str(save_photo(Path(r.path), self.photo_dir, name or "待确认", r.score))
-            except Exception:
-                photo = r.path
-            self.workspace.apply_result(sid, name, klass, r.score, photo, match_status=status)
+                photo = str(save_photo(src, self.photo_dir, name or "待确认", r.score))
+        except Exception:
+            photo = r.path
+        self.workspace.apply_result(sid, name, klass, r.score, photo, match_status=status)
         self.model.refresh_all()
         self.workspace.save()
-        self.status.showMessage(
-            f"识别完成：{len(results)} 张，待确认 {self.model.pending_count()} 条")
         self._refresh_stats()
+        score_text = f"{r.score:g}" if r.score is not None else "待确认"
+        self.status.showMessage(
+            f"识别完成：{name or '未识别'} 分数 {score_text}（{Path(photo).name}）", 15000)
 
     # ---- 导出 ----
     def export_excel(self):
@@ -371,5 +365,6 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         if self.camera is not None:
             self.camera.stop()
+        self.ocr_queue.stop()
         self.workspace.save()
         super().closeEvent(event)
