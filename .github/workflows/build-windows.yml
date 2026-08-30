@@ -52,8 +52,19 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
         run: |
-          # 合成试卷图跑全管线（真实样本含学生隐私，不入仓库）
+          # 源码模式冒烟：合成试卷图跑全管线
           python tools/synthetic_smoke.py
+
+      - name: Smoke test built EXE (validate bundled models and package data)
+        shell: bash
+        run: |
+          # 直接运行打包产物自测：验证模型/rapidocr 数据文件已正确内置
+          cd packaging/dist
+          ./登分助手.exe --smoke
+          EXIT=$?
+          echo "exe exit: $EXIT"
+          cat smoke_result.txt 2>/dev/null || echo "无结果文件"
+          grep -q "SMOKE_OK" smoke_result.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

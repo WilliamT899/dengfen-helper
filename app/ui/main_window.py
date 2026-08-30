@@ -51,11 +51,14 @@ class MainWindow(QMainWindow):
         self.btn_photos = QPushButton("批量导入照片")
         self.btn_export = QPushButton("导出 Excel")
         self.btn_export.setObjectName("primary")
-        for b in (self.btn_roster, self.btn_photos, self.btn_export):
+        self.btn_clear = QPushButton("删除全部")
+        self.btn_clear.setObjectName("danger")
+        for b in (self.btn_roster, self.btn_photos, self.btn_export, self.btn_clear):
             toolbar.addWidget(b)
         self.btn_roster.clicked.connect(self.import_roster)
         self.btn_photos.clicked.connect(self.import_photos)
         self.btn_export.clicked.connect(self.export_excel)
+        self.btn_clear.clicked.connect(self.clear_all)
 
         # ---- 左：摄像头 ----
         left = QWidget()
@@ -136,6 +139,25 @@ class MainWindow(QMainWindow):
 
         self._refresh_stats()
         self._start_camera()
+        self._warmup_engine()
+
+    # ---- 删除全部 ----
+    def clear_all(self):
+        if not self.workspace.rows:
+            self.status.showMessage("表格已为空")
+            return
+        reply = QMessageBox.question(
+            self, "确认删除",
+            f"将删除表格中的全部 {len(self.workspace.rows)} 条记录（姓名和分数），且无法恢复。\n是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.workspace.rows = []
+        self.model.refresh_all()
+        self.workspace.save()
+        self.status.showMessage("已清空全部记录")
+        self._refresh_stats()
 
     # ---- 名单 ----
     def import_roster(self):
@@ -199,11 +221,20 @@ class MainWindow(QMainWindow):
         overlay.show()
         QTimer.singleShot(200, overlay.deleteLater)
 
+    def _warmup_engine(self):
+        """启动时后台加载识别模型（首张照片不用等模型加载），失败提前提示。"""
+        from app.ui.workers import EngineWarmupWorker
+        self._warmup_worker = EngineWarmupWorker()
+        self._warmup_worker.signals.done.connect(
+            lambda result: self.status.showMessage(str(result[1]), 8000))
+        self.thread_pool.start(self._warmup_worker)
+
     def _process_captured(self, frame: np.ndarray):
         try:
             result = recognize_image(frame, get_engine())
         except Exception as exc:
-            self.status.showMessage(f"识别失败：{exc}")
+            self.status.showMessage(
+                f"识别失败：{exc}\n若反复出现，请重启软件或将照片用'批量导入照片'处理", 15000)
             return
         if result.score is None and not result.name:
             self.status.showMessage("未能识别出姓名和分数，请在表格中手动录入")
@@ -246,12 +277,16 @@ class MainWindow(QMainWindow):
         worker = OcrBatchWorker(paths)
         worker.progress.connect(self._on_progress)
         worker.done.connect(self._on_batch_done)
+        worker.error.connect(self._on_worker_error)
         self.thread_pool.start(worker)
         self.btn_photos.setEnabled(False)
 
     def _on_progress(self, done: int, total: int):
         self.progress.setValue(done)
         self.status.showMessage(f"识别中 {done}/{total}…")
+
+    def _on_worker_error(self, message: str):
+        self.status.showMessage(f"⚠ {message}", 15000)
 
     def _on_batch_done(self, results: list):
         self.btn_photos.setEnabled(True)

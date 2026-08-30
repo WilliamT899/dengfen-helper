@@ -1,4 +1,7 @@
-"""后台批量 OCR：QThreadPool 任务，识别结果通过信号回主线程。"""
+"""后台批量 OCR：QThreadPool 任务，识别结果通过信号回主线程。
+
+无论成功与否都发出 done（带已完成的结果），保证界面按钮恢复。
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -25,7 +28,7 @@ class PhotoResult:
 class WorkerSignals(QObject):
     progress = Signal(int, int)          # done, total
     done = Signal(list)                  # List[PhotoResult]
-    error = Signal(str, str)             # 文件, 错误信息
+    error = Signal(str)                  # 错误信息（用户可读）
 
 
 class OcrBatchWorker(QRunnable):
@@ -39,9 +42,14 @@ class OcrBatchWorker(QRunnable):
 
     @Slot()
     def run(self):
-        engine = get_engine()   # 惰性加载模型（首个任务稍慢）
         results: List[PhotoResult] = []
         total = len(self.paths)
+        try:
+            engine = get_engine()   # 惰性加载模型（首个任务稍慢）
+        except Exception as exc:
+            self.signals.error.emit(f"识别引擎初始化失败：{exc}")
+            self.signals.done.emit([])
+            return
         for i, p in enumerate(self.paths, 1):
             try:
                 r = recognize_file(p, engine)
@@ -49,6 +57,22 @@ class OcrBatchWorker(QRunnable):
                     path=str(p), name=r.name, student_id=r.student_id,
                     klass=r.klass, score=r.score, score_conf=r.score_conf))
             except Exception as exc:
-                self.signals.error.emit(str(p), str(exc))
+                self.signals.error.emit(f"{p.name} 识别失败：{exc}")
             self.signals.progress.emit(i, total)
         self.signals.done.emit(results)
+
+
+class EngineWarmupWorker(QRunnable):
+    """启动时后台预热识别模型。"""
+
+    def __init__(self):
+        super().__init__()
+        self.signals = WorkerSignals()
+
+    @Slot()
+    def run(self):
+        try:
+            get_engine()
+            self.signals.done.emit(["ok", "识别模型加载完成"])
+        except Exception as exc:
+            self.signals.done.emit(["error", f"识别模型加载失败：{exc}"])

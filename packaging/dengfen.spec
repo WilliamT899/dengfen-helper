@@ -1,12 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 # 登分助手 PyInstaller 打包配置（Windows onefile）
-import os
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 block_cipher = None
 
 # onnxruntime 动态 DLL 收集
 _ort_datas, _ort_binaries, _ort_hidden = collect_all("onnxruntime")
+
+# rapidocr 包数据文件（config.yaml/default_models.yaml 等），排除包内自带的 onnx（用 app/models 的）
+_rapidocr_datas = [(dest, src) for dest, src in collect_data_files("rapidocr")
+                   if not src.endswith(".onnx")]
+_rapidocr_hidden = collect_all("rapidocr")[2]
 
 a = Analysis(
     ["../main.py"],
@@ -17,8 +21,8 @@ a = Analysis(
         ("../app/models", "app/models"),
         # 深色主题
         ("../app/ui/resources/style.qss", "app/ui/resources"),
-    ] + _ort_datas,
-    hiddenimports=_ort_hidden + ["rapidocr", "rapidocr.main"],
+    ] + _ort_datas + _rapidocr_datas,
+    hiddenimports=_ort_hidden + _rapidocr_hidden,
     hookspath=["."],
     runtime_hooks=[],
     excludes=["tkinter", "matplotlib", "pytest"],

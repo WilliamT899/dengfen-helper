@@ -28,6 +28,10 @@ def _load_style(app: QApplication) -> None:
 
 def main() -> int:
     _ensure_stdio()
+    # 打包完整性自测（CI 对构建产物运行）：无需 GUI，跑合成图识别
+    if "--smoke" in sys.argv:
+        from app.selftest import run_smoke
+        return run_smoke()
     app = QApplication(sys.argv)
     app.setApplicationName(config.APP_NAME)
     _load_style(app)
