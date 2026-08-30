@@ -51,9 +51,12 @@ class OcrEngine:
         self._lock = threading.Lock()
 
     def run(self, image: np.ndarray) -> List[OcrLine]:
-        """整图 OCR：返回 [(box, text, confidence)]。box 为轴对齐矩形 (x0,y0,x1,y1)。"""
+        """整图 OCR：返回 [(box, text, confidence)]。box 为轴对齐矩形 (x0,y0,x1,y1)。
+
+        关闭行方向分类（cls）：我们的管线自行处理竖排旋转，cls 只增加耗时。
+        """
         with self._lock:
-            result = self._ocr(image)
+            result = self._ocr(image, use_cls=False)
         if result is None or result.boxes is None or result.txts is None:
             return []
         boxes = result.boxes

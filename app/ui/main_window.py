@@ -17,12 +17,10 @@ from app import config
 from app.camera import CameraThread
 from app.matcher import match_student
 from app.roster import Roster, load_roster
-from app.ocr.engine import get_engine
-from app.ocr.pipeline import recognize_image
 from app.storage import save_photo
-from app.ui.table_model import COL_SCORE, ScoreTableModel
+from app.ui.table_model import ScoreTableModel
 from app.ui.workers import OcrBatchWorker
-from app.workspace import PENDING, FILLED, Workspace
+from app.workspace import Workspace
 
 
 class MainWindow(QMainWindow):
@@ -194,6 +192,17 @@ class MainWindow(QMainWindow):
 
     def _on_frame(self, frame: np.ndarray):
         self._last_frame = frame
+        # 预览节流：最多 10 帧/秒，避免高分辨率帧转换占满界面线程
+        now = time.monotonic()
+        if now - getattr(self, "_last_preview_ts", 0) < 0.1:
+            return
+        self._last_preview_ts = now
+        # 预览缩小到宽 960 再转换，降低 CPU 占用
+        h, w = frame.shape[:2]
+        scale = min(1.0, 960 / w)
+        if scale < 1.0:
+            frame = cv2.resize(frame, (int(w * scale), int(h * scale)),
+                               interpolation=cv2.INTER_AREA)
         h, w = frame.shape[:2]
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
@@ -209,10 +218,56 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "请先导入学生名单，再拍摄。")
             return
         frame = self._last_frame
-        # 快门动画：白色闪屏
+        # 1) 立刻保存照片（识别成功与否都不丢照片）
+        import datetime
+        tmp_path = self.photo_dir / f"拍摄_{datetime.datetime.now():%Y%m%d_%H%M%S}.jpg"
+        try:
+            self.photo_dir.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(tmp_path), frame)
+        except Exception as exc:
+            self.status.showMessage(f"照片保存失败：{exc}", 10000)
+            return
+        # 2) 快门动画
         self._flash_overlay()
-        self.status.showMessage("识别中…")
-        QTimer.singleShot(50, lambda: self._process_captured(frame))
+        # 3) 后台识别（不阻塞界面，识别期间拍摄键暂时禁用）
+        self.status.showMessage(f"已拍摄（{tmp_path.name}），正在识别姓名和分数…")
+        self.btn_shutter.setEnabled(False)
+        worker = OcrBatchWorker([tmp_path])
+        worker.progress.connect(self._on_progress)
+        worker.error.connect(self._on_worker_error)
+        worker.done.connect(lambda results: self._on_capture_done(results, tmp_path))
+        self.thread_pool.start(worker)
+
+    def _on_capture_done(self, results: list, tmp_path: Path):
+        self.btn_shutter.setEnabled(True)
+        self.progress.setVisible(False)
+        r = results[0] if results else None
+        if r is None or (r.score is None and not r.name):
+            self.status.showMessage(
+                f"未能识别出姓名和分数，照片已保存为 {tmp_path.name}，请在表格中手动录入", 20000)
+            return
+        m = match_student(r.name, r.student_id, self.roster)
+        if m.is_unique:
+            name, sid, klass = m.student.name, m.student.student_id, m.student.klass
+            status = "unique"
+        else:
+            name, sid, klass, status = r.name, r.student_id, r.klass, \
+                ("multiple" if m.status == "multiple" else "none")
+        if status == "unique" and r.score is not None and r.score_conf < 0.75:
+            status = "low_score"
+        # 按识别结果重命名照片：姓名_分数.jpg
+        try:
+            from app.storage import rename_photo
+            photo = str(rename_photo(tmp_path, name or "待确认", r.score) or tmp_path)
+        except Exception:
+            photo = str(tmp_path)
+        self.workspace.apply_result(sid, name, klass, r.score, photo, match_status=status)
+        self.model.refresh_all()
+        self.workspace.save()
+        self._refresh_stats()
+        score_text = f"{r.score:g}" if r.score is not None else "待确认"
+        self.status.showMessage(
+            f"识别完成：{name or '未识别'} 分数 {score_text}（{Path(photo).name}）", 15000)
 
     def _flash_overlay(self):
         overlay = QLabel(self.camera_view)
@@ -229,45 +284,6 @@ class MainWindow(QMainWindow):
             lambda result: self.status.showMessage(str(result[1]), 8000))
         self.thread_pool.start(self._warmup_worker)
 
-    def _process_captured(self, frame: np.ndarray):
-        try:
-            result = recognize_image(frame, get_engine())
-        except Exception as exc:
-            self.status.showMessage(
-                f"识别失败：{exc}\n若反复出现，请重启软件或将照片用'批量导入照片'处理", 15000)
-            return
-        if result.score is None and not result.name:
-            self.status.showMessage("未能识别出姓名和分数，请在表格中手动录入")
-            return
-        # 存档照片
-        photo_path = save_photo(self._frame_to_temp(frame), self.photo_dir,
-                                result.name or "待确认", result.score)
-        m = match_student(result.name, result.student_id, self.roster)
-        if m.is_unique:
-            row = self.workspace.apply_result(
-                m.student.student_id, m.student.name, m.student.klass,
-                result.score, str(photo_path), match_status="unique")
-        else:
-            row = self.workspace.apply_result(
-                result.student_id, result.name, result.klass,
-                result.score, str(photo_path),
-                match_status="multiple" if m.status == "multiple" else "none")
-        self.model.refresh_all()
-        self.workspace.save()
-        self._refresh_stats()
-        name = row.name or "未识别"
-        self.status.showMessage(
-            f"已拍摄：{name} 分数 {result.score if result.score is not None else '待确认'}")
-
-    @staticmethod
-    def _frame_to_temp(frame: np.ndarray) -> Path:
-        import tempfile
-        fd, tmp = tempfile.mkstemp(suffix=".jpg")
-        import os
-        os.close(fd)
-        cv2.imwrite(tmp, frame)
-        return Path(tmp)
-
     def _run_batch(self, paths: list[Path]):
         if not self.roster:
             QMessageBox.information(self, "提示", "请先导入学生名单，再导入照片。")
@@ -281,9 +297,10 @@ class MainWindow(QMainWindow):
         self.thread_pool.start(worker)
         self.btn_photos.setEnabled(False)
 
-    def _on_progress(self, done: int, total: int):
+    def _on_progress(self, done: int, total: int, detail: str = ""):
         self.progress.setValue(done)
-        self.status.showMessage(f"识别中 {done}/{total}…")
+        text = f"识别中 {done}/{total}｜{detail}" if detail else f"识别中 {done}/{total}…"
+        self.status.showMessage(text)
 
     def _on_worker_error(self, message: str):
         self.status.showMessage(f"⚠ {message}", 15000)

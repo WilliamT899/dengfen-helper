@@ -15,11 +15,10 @@ import numpy as np
 from app.ocr import postprocess
 from app.ocr.engine import OcrEngine
 
-STRIP_WIDTHS = (0.16, 0.08)   # 双宽度：宽条覆盖全字段，窄条排除密封线"封/线"文字
-SCORE_CROPS = (         # (y0, y1, x0, x1) 归一化，多框尝试
+STRIP_WIDTHS = (0.16, 0.08)   # 宽条优先；姓名/学号缺失时才用窄条（排除密封线"封/线"文字）
+SCORE_CROPS = (         # (y0, y1, x0, x1) 归一化：顶部窄框 + 稍宽框
     (0.0, 0.15, 0.65, 1.0),
     (0.0, 0.25, 0.65, 1.0),
-    (0.0, 0.12, 0.62, 1.0),
 )
 LABELS = ("姓名", "学号", "班级", "学校")
 VALUE_LABELS = ("姓名", "学号", "班级")
@@ -56,10 +55,10 @@ def _read_strip(engine: OcrEngine, strip: np.ndarray) -> Dict[str, Tuple[str, fl
 
 
 def extract_left_fields(engine: OcrEngine, img: np.ndarray) -> Dict[str, Tuple[str, float]]:
-    """左竖条（双宽度）顺时针旋转 90° 后提取 {标签: (值, 置信度)}。
+    """左竖条顺时针旋转 90° 后提取 {标签: (值, 置信度)}。
 
-    宽条（x<0.16）覆盖全部字段，窄条（x<0.08）排除密封线文字；
-    两轮结果合并：窄条命中优先（更干净），宽条补漏。
+    宽条（x<0.16）覆盖全部字段；姓名/学号缺失时才用窄条（x<0.08）
+    重扫（窄条排除密封线文字，某些样本只有窄条能检出姓名）。
     """
     h, w = img.shape[:2]
     merged: Dict[str, Tuple[str, float]] = {}
@@ -74,6 +73,9 @@ def extract_left_fields(engine: OcrEngine, img: np.ndarray) -> Dict[str, Tuple[s
             elif value and label in ("姓名", "学号") and len(value) > len(cur[0]):
                 # 更完整的值优先
                 merged[label] = (value, conf)
+        # 宽条已拿到姓名和学号 → 不再扫窄条
+        if merged.get("姓名", ("",))[0] and merged.get("学号", ("",))[0]:
+            break
 
     # 清洗
     out: Dict[str, Tuple[str, float]] = {}

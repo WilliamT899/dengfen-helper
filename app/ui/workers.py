@@ -26,7 +26,7 @@ class PhotoResult:
 
 
 class WorkerSignals(QObject):
-    progress = Signal(int, int)          # done, total
+    progress = Signal(int, int, str)     # done, total, 当前文件名
     done = Signal(list)                  # List[PhotoResult]
     error = Signal(str)                  # 错误信息（用户可读）
 
@@ -44,6 +44,7 @@ class OcrBatchWorker(QRunnable):
     def run(self):
         results: List[PhotoResult] = []
         total = len(self.paths)
+        self.signals.progress.emit(0, total, "正在加载识别模型…")
         try:
             engine = get_engine()   # 惰性加载模型（首个任务稍慢）
         except Exception as exc:
@@ -51,6 +52,7 @@ class OcrBatchWorker(QRunnable):
             self.signals.done.emit([])
             return
         for i, p in enumerate(self.paths, 1):
+            self.signals.progress.emit(i - 1, total, f"正在识别：{p.name}")
             try:
                 r = recognize_file(p, engine)
                 results.append(PhotoResult(
@@ -58,7 +60,7 @@ class OcrBatchWorker(QRunnable):
                     klass=r.klass, score=r.score, score_conf=r.score_conf))
             except Exception as exc:
                 self.signals.error.emit(f"{p.name} 识别失败：{exc}")
-            self.signals.progress.emit(i, total)
+            self.signals.progress.emit(i, total, f"完成 {i}/{total}")
         self.signals.done.emit(results)
 
 
